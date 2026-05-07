@@ -85,7 +85,10 @@ def load_artifacts():
     # Prefer sklearn fallback if present (cloud).
     if SK_MODEL_PATH.is_file():
         sk_model = joblib.load(SK_MODEL_PATH)
-        return {"backend": "sklearn", "model": sk_model, "scaler": None}
+        # If a scaler exists, use it so inference matches training.
+        scaler_path = SCALER_PATH if SCALER_PATH.is_file() else LEGACY_SCALER_PATH
+        scaler = joblib.load(scaler_path) if scaler_path.is_file() else None
+        return {"backend": "sklearn", "model": sk_model, "scaler": scaler}
 
     # Otherwise try TensorFlow (local).
     model_path = MODEL_PATH if MODEL_PATH.is_file() else LEGACY_MODEL_PATH
@@ -316,9 +319,9 @@ def main() -> None:
                 x_scaled = bundle["scaler"].transform(x)
                 proba = float(bundle["model"].predict(x_scaled, verbose=0).ravel()[0])
             else:
-                # sklearn: model is trained on the scaled features inside the notebook
-                # (we save the fitted scaler separately in the notebook if you prefer).
-                proba = float(bundle["model"].predict_proba(x)[:, 1][0])
+                # sklearn: model is trained on scaled features in the notebook, so we scale here too.
+                x_in = bundle["scaler"].transform(x) if bundle["scaler"] is not None else x
+                proba = float(bundle["model"].predict_proba(x_in)[:, 1][0])
 
             has_diabetes = proba >= 0.5
             st.divider()
