@@ -1,7 +1,8 @@
-streamlit
-joblib
-numpy
-pandas
-scikit-learn
-tensorflow
+streamlit==1.57.0
+joblib==1.5.3
+numpy==2.4.4
+pandas==3.0.2
+scikit-learn==1.8.0
+# TensorFlow wheels exist for Python 3.11; Streamlit Cloud was using 3.14 without runtime.txt
+tensorflow==2.18.1
 
