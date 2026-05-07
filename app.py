@@ -4,7 +4,6 @@ import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
-import tensorflow as tf
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -12,6 +11,7 @@ ARTIFACTS_DIR = PROJECT_DIR / "artifacts"
 EDA_DIR = ARTIFACTS_DIR / "eda"
 MODEL_PATH = ARTIFACTS_DIR / "diabetes_model.keras"
 SCALER_PATH = ARTIFACTS_DIR / "scaler.pkl"
+SK_MODEL_PATH = ARTIFACTS_DIR / "sk_model.joblib"
 LEGACY_MODEL_PATH = PROJECT_DIR / "diabetes_model.h5"
 LEGACY_SCALER_PATH = PROJECT_DIR / "scaler.pkl"
 DATASET_PATH = PROJECT_DIR / "Dataset" / "diabetes.csv"
@@ -76,18 +76,41 @@ FEATURE_META = {
 
 @st.cache_resource
 def load_artifacts():
-    # Prefer artifacts/ (new). If missing, fall back to legacy files in repo root.
+    """
+    Streamlit Cloud currently runs very new Python versions where TensorFlow wheels may not exist.
+    So we support two inference backends:
+      1) TensorFlow model (.keras or legacy .h5) + scaler.pkl (local)
+      2) scikit-learn fallback model (artifacts/sk_model.joblib) (cloud-friendly)
+    """
+    # Prefer sklearn fallback if present (cloud).
+    if SK_MODEL_PATH.is_file():
+        sk_model = joblib.load(SK_MODEL_PATH)
+        return {"backend": "sklearn", "model": sk_model, "scaler": None}
+
+    # Otherwise try TensorFlow (local).
     model_path = MODEL_PATH if MODEL_PATH.is_file() else LEGACY_MODEL_PATH
     scaler_path = SCALER_PATH if SCALER_PATH.is_file() else LEGACY_SCALER_PATH
 
     if not model_path.is_file():
-        raise FileNotFoundError(f"Missing model file: {MODEL_PATH} (or legacy {LEGACY_MODEL_PATH})")
+        raise FileNotFoundError(
+            f"Missing model file: {MODEL_PATH} (or legacy {LEGACY_MODEL_PATH}) and no {SK_MODEL_PATH}"
+        )
     if not scaler_path.is_file():
         raise FileNotFoundError(f"Missing scaler file: {SCALER_PATH} (or legacy {LEGACY_SCALER_PATH})")
 
+    try:
+        import tensorflow as tf  # lazy import
+
+        tf.get_logger().setLevel("ERROR")
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(
+            "TensorFlow is not available in this environment. "
+            f"Either deploy with {SK_MODEL_PATH.name} or run locally with TensorFlow installed.\n\nOriginal error: {e}"
+        ) from e
+
     model = tf.keras.models.load_model(model_path)
     scaler = joblib.load(scaler_path)
-    return model, scaler
+    return {"backend": "tensorflow", "model": model, "scaler": scaler}
 
 
 @st.cache_data
@@ -168,11 +191,12 @@ def main() -> None:
     page = st.sidebar.radio("Navigate", ["Predict", "Dataset"], index=0)
 
     try:
-        model, scaler = load_artifacts()
+        bundle = load_artifacts()
     except Exception as e:
         st.error(
             "Could not load artifacts. Run the notebook cells that save the model/scaler first.\n\n"
             f"Expected (preferred):\n- {MODEL_PATH}\n- {SCALER_PATH}\n\n"
+            f"Cloud-friendly fallback:\n- {SK_MODEL_PATH}\n\n"
             f"Fallback (legacy):\n- {LEGACY_MODEL_PATH}\n- {LEGACY_SCALER_PATH}\n\n"
             f"Error: {e}"
         )
@@ -286,8 +310,15 @@ def main() -> None:
 
         if st.button("Predict", type="primary", use_container_width=True):
             row = pd.DataFrame([[st.session_state[c] for c in FEATURE_ORDER]], columns=FEATURE_ORDER)
-            x_scaled = scaler.transform(row.values.astype(np.float64))
-            proba = float(model.predict(x_scaled, verbose=0).ravel()[0])
+            x = row.values.astype(np.float64)
+
+            if bundle["backend"] == "tensorflow":
+                x_scaled = bundle["scaler"].transform(x)
+                proba = float(bundle["model"].predict(x_scaled, verbose=0).ravel()[0])
+            else:
+                # sklearn: model is trained on the scaled features inside the notebook
+                # (we save the fitted scaler separately in the notebook if you prefer).
+                proba = float(bundle["model"].predict_proba(x)[:, 1][0])
 
             has_diabetes = proba >= 0.5
             st.divider()
